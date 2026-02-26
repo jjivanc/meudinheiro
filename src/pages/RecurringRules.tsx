@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { User } from 'firebase/auth';
 import {
   getRecurringRules,
@@ -63,7 +63,7 @@ export default function RecurringRules({ user }: Props) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true);
     const [r, a, c] = await Promise.all([
       getRecurringRules(user.uid),
@@ -74,10 +74,10 @@ export default function RecurringRules({ user }: Props) {
     setAccounts(a);
     setCategories(c);
     setLoading(false);
-  };
+  }, [user.uid]);
 
   // Auto-generate entries for active recurring rules in the current month
-  const generateEntries = async (loadedRules: RecurringRule[]) => {
+  const generateEntries = useCallback(async (loadedRules: RecurringRule[]) => {
     const now = new Date();
     const year = now.getFullYear();
     const month = now.getMonth() + 1;
@@ -99,7 +99,7 @@ export default function RecurringRules({ user }: Props) {
         });
       }
     }
-  };
+  }, [user.uid]);
 
   useEffect(() => {
     (async () => {
@@ -115,7 +115,7 @@ export default function RecurringRules({ user }: Props) {
       setCategories(c);
       setLoading(false);
     })();
-  }, [user.uid]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [user.uid, generateEntries]);
 
   const accountName = (id: string) => accounts.find((a) => a.id === id)?.name ?? id;
   const categoryName = (id?: string) => id ? (categories.find((c) => c.id === id)?.name ?? id) : '-';

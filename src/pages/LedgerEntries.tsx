@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { User } from 'firebase/auth';
 import {
   getLedgerEntries,
@@ -49,7 +49,7 @@ export default function LedgerEntries({ user }: Props) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true);
     const [e, a, c] = await Promise.all([
       getLedgerEntries(user.uid),
@@ -60,9 +60,9 @@ export default function LedgerEntries({ user }: Props) {
     setAccounts(a);
     setCategories(c);
     setLoading(false);
-  };
+  }, [user.uid]);
 
-  useEffect(() => { load(); }, [user.uid]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { load(); }, [load]);
 
   const accountName = (id: string) => accounts.find((a) => a.id === id)?.name ?? id;
   const categoryName = (id?: string) => id ? (categories.find((c) => c.id === id)?.name ?? id) : '-';

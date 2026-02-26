@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { User } from 'firebase/auth';
 import {
   getCategories,
@@ -25,14 +25,14 @@ export default function Categories({ user }: Props) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true);
     const data = await getCategories(user.uid);
     setCategories(data);
     setLoading(false);
-  };
+  }, [user.uid]);
 
-  useEffect(() => { load(); }, [user.uid]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { load(); }, [load]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
