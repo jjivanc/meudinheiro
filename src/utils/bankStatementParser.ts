@@ -45,21 +45,26 @@ function parseDate(raw: string): Date | null {
   raw = raw.trim();
   const brMatch = raw.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
   if (brMatch) {
-    return new Date(
-      `${brMatch[3]}-${brMatch[2]}-${brMatch[1]}T12:00:00`,
-    );
+    // Reject placeholder dates like "00/00/0000"
+    if (brMatch[1] === '00' || brMatch[2] === '00') return null;
+    const d = new Date(`${brMatch[3]}-${brMatch[2]}-${brMatch[1]}T12:00:00`);
+    return isNaN(d.getTime()) ? null : d;
   }
   const isoMatch = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (isoMatch) {
-    return new Date(`${isoMatch[1]}-${isoMatch[2]}-${isoMatch[3]}T12:00:00`);
+    const d = new Date(`${isoMatch[1]}-${isoMatch[2]}-${isoMatch[3]}T12:00:00`);
+    return isNaN(d.getTime()) ? null : d;
   }
   return null;
 }
 
 /** Parse a BRL-formatted or plain decimal value string to cents */
 function parseAmountToCents(raw: string): number {
-  // Remove currency symbols, spaces
+  // Remove currency symbols and spaces
   let cleaned = raw.replace(/[R$\s]/g, '').trim();
+  // Track and strip leading minus sign so the BR-format regex can match
+  const negative = cleaned.startsWith('-');
+  if (negative) cleaned = cleaned.slice(1);
   // Handle Brazilian format: 1.234,56 → 1234.56
   if (/^\d{1,3}(\.\d{3})*(,\d{1,2})?$/.test(cleaned)) {
     cleaned = cleaned.replace(/\./g, '').replace(',', '.');
@@ -68,7 +73,8 @@ function parseAmountToCents(raw: string): number {
     cleaned = cleaned.replace(',', '.');
   }
   const value = parseFloat(cleaned);
-  return isNaN(value) ? 0 : Math.round(value * 100);
+  const cents = isNaN(value) ? 0 : Math.round(value * 100);
+  return negative ? -cents : cents;
 }
 
 function entryType(amountCents: number): LedgerEntryType {
@@ -80,9 +86,8 @@ function entryType(amountCents: number): LedgerEntryType {
 /**
  * Parse a bank statement CSV file.
  *
- * Supports the most common Brazilian bank export formats:
- *   date, description, value
- *   data, historico/descricao, valor/debito/credito
+ * Supports the most common Brazilian bank export formats including
+ * Banco do Brasil (Data, Lançamento, Detalhes, N° documento, Valor, Tipo Lançamento).
  *
  * The first row is expected to be a header row.
  */
@@ -97,29 +102,68 @@ export function parseCsv(text: string): ParsedTransaction[] {
   // Detect delimiter: semicolon or comma
   const delimiter = lines[0].includes(';') ? ';' : ',';
 
-  const splitRow = (line: string): string[] =>
-    line.split(delimiter).map((c) => c.replace(/^["']|["']$/g, '').trim());
+  // Parse a CSV row respecting quoted fields that may contain the delimiter
+  // e.g. "112,00" must not be split on the internal comma.
+  // Handles doubled-quote escaping ("") per RFC 4180.
+  const splitRow = (line: string): string[] => {
+    const result: string[] = [];
+    let current = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if ((ch === '"' || ch === "'") && !inQuotes) {
+        inQuotes = true;
+      } else if (ch === '"' && inQuotes) {
+        // Doubled-quote ("") is an escaped literal quote inside a quoted field
+        if (line[i + 1] === '"') {
+          current += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else if (ch === delimiter && !inQuotes) {
+        result.push(current.trim());
+        current = '';
+      } else {
+        current += ch;
+      }
+    }
+    result.push(current.trim());
+    return result;
+  };
 
-  const headers = splitRow(lines[0]).map((h) => h.toLowerCase());
+  // Normalize text for header matching: lowercase + remove diacritics
+  // e.g. "Lançamento" → "lancamento", "Saída" → "saida"
+  const norm = (s: string) =>
+    s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
+  const headers = splitRow(lines[0]).map(norm);
 
   // Try to find column indices
-  const dateIdx = headers.findIndex((h) =>
-    /^(data|date|dt)/.test(h),
-  );
+  const dateIdx = headers.findIndex((h) => /^(data|date|dt)/.test(h));
   const descIdx = headers.findIndex((h) =>
     /^(descri|histor|memo|lanc|descr|desc)/.test(h),
+  );
+  // Optional "Detalhes" / detail column used by some banks (e.g. Banco do Brasil)
+  const detailsIdx = headers.findIndex((h) =>
+    /^(detalhe|detail|complemento|memo2)/.test(h),
   );
   // Signed value column (positive = credit, negative = debit)
   const valueIdx = headers.findIndex((h) =>
     /^(valor|value|amount|val\b)/.test(h),
   );
   // Separate debit/credit columns (some banks split them)
-  const debitIdx = headers.findIndex((h) => /^(debito|debit|saida|saída)/.test(h));
+  const debitIdx = headers.findIndex((h) => /^(debito|debit|saida)/.test(h));
   const creditIdx = headers.findIndex((h) =>
-    /^(credito|crédito|credit|entrada)/.test(h),
+    /^(credito|credit|entrada)/.test(h),
   );
+  // "Tipo Lançamento" / type column used by banks like Banco do Brasil
+  const typeIdx = headers.findIndex((h) => /^tipo/.test(h));
 
   if (dateIdx === -1 || descIdx === -1) return [];
+
+  // Keywords that identify non-transaction balance/summary rows to skip
+  const SKIP_KEYWORDS = /^(saldo|s\s+a\s+l\s+d\s+o)/i;
 
   const transactions: ParsedTransaction[] = [];
 
@@ -127,7 +171,14 @@ export function parseCsv(text: string): ParsedTransaction[] {
     const cols = splitRow(lines[i]);
     const date = parseDate(cols[dateIdx] ?? '');
     if (!date) continue;
-    const description = cols[descIdx] ?? '';
+
+    const lancamento = cols[descIdx] ?? '';
+    // Skip balance/summary rows (e.g. "Saldo Anterior", "Saldo do dia", "S A L D O")
+    if (SKIP_KEYWORDS.test(lancamento)) continue;
+
+    // Combine description: primary column + details column when available
+    const details = detailsIdx !== -1 ? (cols[detailsIdx] ?? '') : '';
+    const description = details ? `${lancamento}: ${details}` : lancamento;
 
     let amountCents = 0;
     if (valueIdx !== -1 && cols[valueIdx]) {
@@ -146,12 +197,27 @@ export function parseCsv(text: string): ParsedTransaction[] {
 
     if (amountCents === 0 && !description) continue;
 
+    // Determine entry type: prefer explicit type column ("Entrada"/"Saída") over sign
+    let type: LedgerEntryType;
+    if (typeIdx !== -1 && cols[typeIdx]) {
+      const typeVal = norm(cols[typeIdx]);
+      if (/^(entrada|credito|credit)/.test(typeVal)) {
+        type = 'income';
+      } else if (/^(saida|debito|debit)/.test(typeVal)) {
+        type = 'expense';
+      } else {
+        type = entryType(amountCents);
+      }
+    } else {
+      type = entryType(amountCents);
+    }
+
     const dateStr = date.toISOString().slice(0, 10);
     transactions.push({
       date,
       description,
       amountCents: Math.abs(amountCents),
-      type: entryType(amountCents),
+      type,
       importHash: computeImportHash(dateStr, description, Math.abs(amountCents)),
     });
   }
