@@ -31,12 +31,24 @@ export interface LedgerEntry {
   type: LedgerEntryType;
   amountCents: number; // amount in minor units (cents)
   description: string;
+  details?: string; // additional details from bank statement (e.g. Detalhes column)
+  documentId?: string; // bank document/transaction number (e.g. N° documento column)
   date: Date;
   recurring?: boolean;
   recurringRuleId?: string;
   importHash?: string;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface AccountBalance {
+  id: string;
+  userId: string;
+  accountId: string;
+  date: Date;
+  balanceCents: number; // balance in minor units (cents)
+  importHash: string;
+  createdAt: Date;
 }
 
 export type RecurringFrequency = 'monthly' | 'weekly' | 'yearly';

@@ -1,9 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
 import { User } from 'firebase/auth';
-import { getAccounts, importLedgerEntries } from '../firebase/firestore';
+import { getAccounts, importLedgerEntries, importAccountBalances } from '../firebase/firestore';
 import { parseBankStatementFile } from '../utils/bankStatementParser';
 import type { Account } from '../domain/types';
-import type { ParsedTransaction } from '../utils/bankStatementParser';
+import type { ParsedTransaction, ParsedBalance } from '../utils/bankStatementParser';
 
 interface Props {
   user: User;
@@ -26,6 +26,7 @@ export default function ImportBankStatement({ user }: Props) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [accountId, setAccountId] = useState('');
   const [transactions, setTransactions] = useState<ParsedTransaction[]>([]);
+  const [balances, setBalances] = useState<ParsedBalance[]>([]);
   const [fileName, setFileName] = useState('');
   const [parseError, setParseError] = useState('');
   const [importing, setImporting] = useState(false);
@@ -44,18 +45,20 @@ export default function ImportBankStatement({ user }: Props) {
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     setParseError('');
     setTransactions([]);
+    setBalances([]);
     setResult(null);
     const file = e.target.files?.[0];
     if (!file) return;
     setFileName(file.name);
     try {
       const parsed = await parseBankStatementFile(file);
-      if (parsed.length === 0) {
+      if (parsed.transactions.length === 0 && parsed.balances.length === 0) {
         setParseError(
           'Nenhuma transação encontrada no arquivo. Verifique o formato (CSV ou OFX).',
         );
       } else {
-        setTransactions(parsed);
+        setTransactions(parsed.transactions);
+        setBalances(parsed.balances);
       }
     } catch {
       setParseError('Erro ao ler o arquivo. Verifique se é um CSV ou OFX válido.');
@@ -65,13 +68,15 @@ export default function ImportBankStatement({ user }: Props) {
   };
 
   const handleImport = async () => {
-    if (!accountId || transactions.length === 0) return;
+    if (!accountId || (transactions.length === 0 && balances.length === 0)) return;
     setImporting(true);
     setResult(null);
     try {
       const res = await importLedgerEntries(user.uid, accountId, transactions);
+      await importAccountBalances(user.uid, accountId, balances);
       setResult(res);
       setTransactions([]);
+      setBalances([]);
       setFileName('');
     } catch {
       setParseError('Erro ao importar os lançamentos. Tente novamente.');
@@ -141,11 +146,18 @@ export default function ImportBankStatement({ user }: Props) {
         </div>
       )}
 
-      {transactions.length > 0 && (
+      {(transactions.length > 0 || balances.length > 0) && (
         <>
           <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '0.75rem' }}>
             <p style={{ margin: 0, color: '#475569' }}>
-              <strong>{transactions.length}</strong> transação(ões) encontrada(s) em{' '}
+              {transactions.length > 0 && (
+                <><strong>{transactions.length}</strong> lançamento(s)</>
+              )}
+              {transactions.length > 0 && balances.length > 0 && ' e '}
+              {balances.length > 0 && (
+                <><strong>{balances.length}</strong> saldo(s)</>
+              )}
+              {' '}encontrado(s) em{' '}
               <em>{fileName}</em>. Revise abaixo e confirme a importação.
             </p>
             <button

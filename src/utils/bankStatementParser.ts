@@ -3,9 +3,22 @@ import type { LedgerEntryType } from '../domain/types';
 export interface ParsedTransaction {
   date: Date;
   description: string;
+  details?: string;
+  documentId?: string;
   amountCents: number;
   type: LedgerEntryType;
   importHash: string;
+}
+
+export interface ParsedBalance {
+  date: Date;
+  balanceCents: number;
+  importHash: string;
+}
+
+export interface ParsedBankStatement {
+  transactions: ParsedTransaction[];
+  balances: ParsedBalance[];
 }
 
 // ── Hash ──────────────────────────────────────────────────────────────────────
@@ -91,13 +104,13 @@ function entryType(amountCents: number): LedgerEntryType {
  *
  * The first row is expected to be a header row.
  */
-export function parseCsv(text: string): ParsedTransaction[] {
+export function parseCsv(text: string): ParsedBankStatement {
   const lines = text
     .split(/\r?\n/)
     .map((l) => l.trim())
     .filter((l) => l.length > 0);
 
-  if (lines.length < 2) return [];
+  if (lines.length < 2) return { transactions: [], balances: [] };
 
   // Detect delimiter: semicolon or comma
   const delimiter = lines[0].includes(';') ? ';' : ',';
@@ -148,6 +161,8 @@ export function parseCsv(text: string): ParsedTransaction[] {
   const detailsIdx = headers.findIndex((h) =>
     /^(detalhe|detail|complemento|memo2)/.test(h),
   );
+  // "N° documento" / document number column used by banks like Banco do Brasil
+  const docIdx = headers.findIndex((h) => /^n[°o]?\s*(doc|documento)/.test(h));
   // Signed value column (positive = credit, negative = debit)
   const valueIdx = headers.findIndex((h) =>
     /^(valor|value|amount|val\b)/.test(h),
@@ -160,25 +175,50 @@ export function parseCsv(text: string): ParsedTransaction[] {
   // "Tipo Lançamento" / type column used by banks like Banco do Brasil
   const typeIdx = headers.findIndex((h) => /^tipo/.test(h));
 
-  if (dateIdx === -1 || descIdx === -1) return [];
+  if (dateIdx === -1 || descIdx === -1) return { transactions: [], balances: [] };
 
-  // Keywords that identify non-transaction balance/summary rows to skip
-  const SKIP_KEYWORDS = /^(saldo|s\s+a\s+l\s+d\s+o)/i;
+  // "Saldo Anterior" rows should be skipped; "S A L D O" rows are captured as balances
+  const SKIP_SALDO_ANTERIOR = /^saldo\s+anterior/i;
+  // "S A L D O" pattern: letters separated by spaces (e.g. "S A L D O")
+  const IS_SALDO = /^s\s+a\s+l\s+d\s+o/i;
 
   const transactions: ParsedTransaction[] = [];
+  const balances: ParsedBalance[] = [];
 
   for (let i = 1; i < lines.length; i++) {
     const cols = splitRow(lines[i]);
     const date = parseDate(cols[dateIdx] ?? '');
+    // Skip rows with invalid/placeholder dates (e.g. 00/00/0000)
     if (!date) continue;
 
     const lancamento = cols[descIdx] ?? '';
-    // Skip balance/summary rows (e.g. "Saldo Anterior", "Saldo do dia", "S A L D O")
-    if (SKIP_KEYWORDS.test(lancamento)) continue;
 
-    // Combine description: primary column + details column when available
-    const details = detailsIdx !== -1 ? (cols[detailsIdx] ?? '') : '';
-    const description = details ? `${lancamento}: ${details}` : lancamento;
+    // Skip "Saldo Anterior" rows
+    if (SKIP_SALDO_ANTERIOR.test(lancamento)) continue;
+
+    // Capture "S A L D O" rows as daily balance records
+    if (IS_SALDO.test(lancamento)) {
+      let balanceCents = 0;
+      if (valueIdx !== -1 && cols[valueIdx]) {
+        balanceCents = parseAmountToCents(cols[valueIdx]);
+      } else if (creditIdx !== -1 && cols[creditIdx]) {
+        balanceCents = parseAmountToCents(cols[creditIdx]);
+      }
+      const dateStr = date.toISOString().slice(0, 10);
+      balances.push({
+        date,
+        balanceCents,
+        importHash: computeImportHash(dateStr, 'SALDO', balanceCents),
+      });
+      continue;
+    }
+
+    // Store details as a plain string (separate from the main description)
+    const details: string = detailsIdx !== -1 ? String(cols[detailsIdx] ?? '') : '';
+    const description = lancamento;
+
+    // Store the document number (N° documento) as the external transaction ID
+    const documentId: string = docIdx !== -1 ? String(cols[docIdx] ?? '') : '';
 
     let amountCents = 0;
     if (valueIdx !== -1 && cols[valueIdx]) {
@@ -213,16 +253,19 @@ export function parseCsv(text: string): ParsedTransaction[] {
     }
 
     const dateStr = date.toISOString().slice(0, 10);
-    transactions.push({
+    const entry: ParsedTransaction = {
       date,
       description,
       amountCents: Math.abs(amountCents),
       type,
       importHash: computeImportHash(dateStr, description, Math.abs(amountCents)),
-    });
+    };
+    if (details.trim()) entry.details = details.trim();
+    if (documentId.trim()) entry.documentId = documentId.trim();
+    transactions.push(entry);
   }
 
-  return transactions;
+  return { transactions, balances };
 }
 
 // ── OFX parser ────────────────────────────────────────────────────────────────
@@ -231,7 +274,7 @@ export function parseCsv(text: string): ParsedTransaction[] {
  * Parse an OFX/QFX bank statement file (SGML or XML variants).
  * Extracts <STMTTRN> blocks and returns normalized transactions.
  */
-export function parseOfx(text: string): ParsedTransaction[] {
+export function parseOfx(text: string): ParsedBankStatement {
   const transactions: ParsedTransaction[] = [];
 
   // Match every <STMTTRN>...</STMTTRN> block (XML) or flat SGML sections
@@ -266,13 +309,16 @@ export function parseOfx(text: string): ParsedTransaction[] {
       fields['MEMO'] ?? fields['NAME'] ?? fields['FITID'] ?? '';
 
     const dateStr = date.toISOString().slice(0, 10);
-    transactions.push({
+    const fitid = fields['FITID'] ?? '';
+    const ofxEntry: ParsedTransaction = {
       date,
       description,
       amountCents: Math.abs(amountCents),
       type: entryType(amountCents),
       importHash: computeImportHash(dateStr, description, Math.abs(amountCents)),
-    });
+    };
+    if (fitid.trim()) ofxEntry.documentId = fitid.trim();
+    transactions.push(ofxEntry);
   }
 
   // SGML variant: no closing tags – match flat sections between <STMTTRN> tags
@@ -305,17 +351,20 @@ export function parseOfx(text: string): ParsedTransaction[] {
         fields['MEMO'] ?? fields['NAME'] ?? fields['FITID'] ?? '';
 
       const dateStr = date.toISOString().slice(0, 10);
-      transactions.push({
+      const fitid = fields['FITID'] ?? '';
+      const sgmlEntry: ParsedTransaction = {
         date,
         description,
         amountCents: Math.abs(amountCents),
         type: entryType(amountCents),
         importHash: computeImportHash(dateStr, description, Math.abs(amountCents)),
-      });
+      };
+      if (fitid.trim()) sgmlEntry.documentId = fitid.trim();
+      transactions.push(sgmlEntry);
     }
   }
 
-  return transactions;
+  return { transactions, balances: [] };
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -323,7 +372,7 @@ export function parseOfx(text: string): ParsedTransaction[] {
 /** Read a File object and parse its contents based on the file extension. */
 export async function parseBankStatementFile(
   file: File,
-): Promise<ParsedTransaction[]> {
+): Promise<ParsedBankStatement> {
   const text = await file.text();
   const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
   if (ext === 'ofx' || ext === 'qfx') return parseOfx(text);

@@ -19,7 +19,7 @@ import type {
   LedgerEntry,
   RecurringRule,
 } from '../domain/types';
-import type { ParsedTransaction } from '../utils/bankStatementParser';
+import type { ParsedTransaction, ParsedBalance } from '../utils/bankStatementParser';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -309,7 +309,7 @@ export async function importLedgerEntries(
     const now = Timestamp.now();
     chunk.forEach((t) => {
       const ref = doc(col);
-      batch.set(ref, {
+      const entry: Record<string, unknown> = {
         userId,
         accountId,
         type: t.type,
@@ -319,6 +319,65 @@ export async function importLedgerEntries(
         importHash: t.importHash,
         createdAt: now,
         updatedAt: now,
+      };
+      if (t.details && t.details.trim()) entry['details'] = t.details;
+      if (t.documentId && t.documentId.trim()) entry['documentId'] = t.documentId;
+      batch.set(ref, entry);
+    });
+    await batch.commit();
+  }
+
+  return { imported: toImport.length, skipped };
+}
+
+// ── Account Balances ──────────────────────────────────────────────────────────
+
+const accountBalancesCol = (userId: string) =>
+  collection(db, 'users', userId, 'accountBalances');
+
+/**
+ * Import daily balance records parsed from a bank statement.
+ * Records whose importHash already exists are skipped to prevent duplicates.
+ */
+export async function importAccountBalances(
+  userId: string,
+  accountId: string,
+  balances: ParsedBalance[],
+): Promise<{ imported: number; skipped: number }> {
+  if (balances.length === 0) return { imported: 0, skipped: 0 };
+
+  const col = accountBalancesCol(userId);
+  const allHashes = balances.map((b) => b.importHash);
+  const existingHashes = new Set<string>();
+
+  const BATCH_SIZE = 30;
+  for (let i = 0; i < allHashes.length; i += BATCH_SIZE) {
+    const chunk = allHashes.slice(i, i + BATCH_SIZE);
+    const q = query(col, where('importHash', 'in', chunk));
+    const snap = await getDocs(q);
+    snap.docs.forEach((d) => {
+      const hash = d.data()['importHash'] as string | undefined;
+      if (hash) existingHashes.add(hash);
+    });
+  }
+
+  const toImport = balances.filter((b) => !existingHashes.has(b.importHash));
+  const skipped = balances.length - toImport.length;
+
+  const WRITE_BATCH_SIZE = 500;
+  for (let i = 0; i < toImport.length; i += WRITE_BATCH_SIZE) {
+    const chunk = toImport.slice(i, i + WRITE_BATCH_SIZE);
+    const batch = writeBatch(db);
+    const now = Timestamp.now();
+    chunk.forEach((b) => {
+      const ref = doc(col);
+      batch.set(ref, {
+        userId,
+        accountId,
+        date: Timestamp.fromDate(b.date),
+        balanceCents: b.balanceCents,
+        importHash: b.importHash,
+        createdAt: now,
       });
     });
     await batch.commit();
