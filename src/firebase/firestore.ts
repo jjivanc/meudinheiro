@@ -8,6 +8,7 @@ import {
   query,
   orderBy,
   where,
+  writeBatch,
   Timestamp,
   DocumentData,
 } from 'firebase/firestore';
@@ -18,6 +19,7 @@ import type {
   LedgerEntry,
   RecurringRule,
 } from '../domain/types';
+import type { ParsedTransaction } from '../utils/bankStatementParser';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -256,4 +258,71 @@ export async function getGeneratedEntryForRule(
   if (snap.empty) return null;
   const d = snap.docs[0];
   return docToLedgerEntry(d.id, d.data());
+}
+
+// ── Bank Statement Import ─────────────────────────────────────────────────────
+
+export interface ImportResult {
+  imported: number;
+  skipped: number;
+}
+
+/**
+ * Import parsed bank-statement transactions into ledgerEntries.
+ * Transactions whose importHash already exists in the collection are skipped.
+ * Returns the count of imported and skipped entries.
+ */
+export async function importLedgerEntries(
+  userId: string,
+  accountId: string,
+  transactions: ParsedTransaction[],
+): Promise<ImportResult> {
+  if (transactions.length === 0) return { imported: 0, skipped: 0 };
+
+  const col = ledgerCol(userId);
+
+  // Collect all hashes and check for existing ones in batches of 30
+  const allHashes = transactions.map((t) => t.importHash);
+  const existingHashes = new Set<string>();
+
+  const BATCH_SIZE = 30;
+  for (let i = 0; i < allHashes.length; i += BATCH_SIZE) {
+    const chunk = allHashes.slice(i, i + BATCH_SIZE);
+    const q = query(col, where('importHash', 'in', chunk));
+    const snap = await getDocs(q);
+    snap.docs.forEach((d) => {
+      const hash = d.data()['importHash'] as string | undefined;
+      if (hash) existingHashes.add(hash);
+    });
+  }
+
+  const toImport = transactions.filter(
+    (t) => !existingHashes.has(t.importHash),
+  );
+  const skipped = transactions.length - toImport.length;
+
+  // Write new entries in batches of 500 (Firestore writeBatch limit)
+  const WRITE_BATCH_SIZE = 500;
+  for (let i = 0; i < toImport.length; i += WRITE_BATCH_SIZE) {
+    const chunk = toImport.slice(i, i + WRITE_BATCH_SIZE);
+    const batch = writeBatch(db);
+    const now = Timestamp.now();
+    chunk.forEach((t) => {
+      const ref = doc(col);
+      batch.set(ref, {
+        userId,
+        accountId,
+        type: t.type,
+        amountCents: t.amountCents,
+        description: t.description,
+        date: Timestamp.fromDate(t.date),
+        importHash: t.importHash,
+        createdAt: now,
+        updatedAt: now,
+      });
+    });
+    await batch.commit();
+  }
+
+  return { imported: toImport.length, skipped };
 }

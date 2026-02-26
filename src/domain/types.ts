@@ -34,6 +34,7 @@ export interface LedgerEntry {
   date: Date;
   recurring?: boolean;
   recurringRuleId?: string;
+  importHash?: string;
   createdAt: Date;
   updatedAt: Date;
 }
