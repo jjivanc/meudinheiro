@@ -179,6 +179,7 @@ export function parseCsv(text: string): ParsedBankStatement {
 
   // "Saldo Anterior" rows should be skipped; "S A L D O" rows are captured as balances
   const SKIP_SALDO_ANTERIOR = /^saldo\s+anterior/i;
+  const SKIP_SALDO_DO_DIA = /^saldo\s+do\s+dia/i;
   // "S A L D O" pattern: letters separated by spaces (e.g. "S A L D O")
   const IS_SALDO = /^s\s+a\s+l\s+d\s+o/i;
 
@@ -194,7 +195,8 @@ export function parseCsv(text: string): ParsedBankStatement {
     const lancamento = cols[descIdx] ?? '';
 
     // Skip "Saldo Anterior" rows
-    if (SKIP_SALDO_ANTERIOR.test(lancamento)) continue;
+    if (SKIP_SALDO_ANTERIOR.test(lancamento) ) continue;
+    if (SKIP_SALDO_DO_DIA.test(lancamento) ) continue;
 
     // Capture "S A L D O" rows as daily balance records
     if (IS_SALDO.test(lancamento)) {
@@ -290,7 +292,12 @@ export function parseOfx(text: string): ParsedBankStatement {
     while ((tag = tagRe.exec(body)) !== null) {
       fields[tag[1].toUpperCase()] = tag[2].trim();
     }
-
+    const name = fields['NAME'] ?? '';
+    const memo = fields['MEMO']?.replace(/\d+\W/g, "") ?? "";
+    if( name === "Saldo Anterior" || name === "Saldo do dia" ) {
+      continue;
+    }
+    
     const dtPosted = fields['DTPOSTED'] ?? '';
     // OFX date format: YYYYMMDD or YYYYMMDDHHMMSS[tz]
     const year = dtPosted.slice(0, 4);
@@ -306,7 +313,7 @@ export function parseOfx(text: string): ParsedBankStatement {
       : Math.round(amountFloat * 100);
 
     const description =
-      fields['MEMO'] ?? fields['NAME'] ?? fields['FITID'] ?? '';
+      memo ?? name ?? fields['FITID'] ?? '';
 
     const dateStr = date.toISOString().slice(0, 10);
     const fitid = fields['FITID'] ?? '';
@@ -323,6 +330,7 @@ export function parseOfx(text: string): ParsedBankStatement {
 
   // SGML variant: no closing tags – match flat sections between <STMTTRN> tags
   if (transactions.length === 0) {
+    
     const sgmlRe = /<STMTTRN>([\s\S]*?)(?=<STMTTRN>|<\/BANKTRANLIST>|$)/gi;
     let sgmlBlock: RegExpExecArray | null;
     while ((sgmlBlock = sgmlRe.exec(text)) !== null) {
@@ -333,7 +341,10 @@ export function parseOfx(text: string): ParsedBankStatement {
       while ((tag = tagRe.exec(body)) !== null) {
         fields[tag[1].toUpperCase()] = tag[2].trim();
       }
-
+      if( fields["NAME"] === "Saldo Anterior" || fields["NAME"] === "Saldo do Dia" ) {
+      console.log("Found SALDO ANTERIOR OR Saldo do dia entry, skipping", fields);
+      continue;
+      }
       const dtPosted = fields['DTPOSTED'] ?? '';
       const year = dtPosted.slice(0, 4);
       const month = dtPosted.slice(4, 6);
