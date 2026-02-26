@@ -10,6 +10,7 @@ import Accounts from './pages/Accounts';
 import Categories from './pages/Categories';
 import LedgerEntries from './pages/LedgerEntries';
 import RecurringRules from './pages/RecurringRules';
+import ImportBankStatement from './pages/ImportBankStatement';
 
 export default function App() {
   const [user, setUser] = useState<User | null | undefined>(undefined);
@@ -44,6 +45,7 @@ export default function App() {
         <Route path="categorias" element={<Categories user={user!} />} />
         <Route path="lancamentos" element={<LedgerEntries user={user!} />} />
         <Route path="despesas-fixas" element={<RecurringRules user={user!} />} />
+        <Route path="importar-extrato" element={<ImportBankStatement user={user!} />} />
       </Route>
       <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>
